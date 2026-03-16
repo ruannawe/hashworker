@@ -11,28 +11,27 @@ TCP message-processing system written in Go (Luxor Backend Challenge).
 
 ## Quick start
 
-### 1. Start services
+### 1. Start dependencies (PostgreSQL + RabbitMQ)
 
 ```bash
-docker compose up -d
+docker compose up -d postgres rabbitmq
 ```
 
 ### 2. Run the server
 
 ```bash
-# Without DB/queue (in-memory only):
+# In-memory only (no DB/queue):
 go run ./cmd/server
 
-# With PostgreSQL:
-DATABASE_URL="postgres://luxor:luxor@localhost/luxor?sslmode=disable" go run ./cmd/server
-
-# With PostgreSQL + RabbitMQ:
-DATABASE_URL="postgres://luxor:luxor@localhost/luxor?sslmode=disable" \
-AMQP_URL="amqp://guest:guest@localhost:5672/" \
+# With PostgreSQL + RabbitMQ (reads from .env automatically):
 go run ./cmd/server
 ```
 
-Default listen address: `:8080`. Override with `LISTEN_ADDR`.
+| Env var        | Default     | Description              |
+|----------------|-------------|--------------------------|
+| `LISTEN_ADDR`  | `:8080`     | TCP listen address       |
+| `DATABASE_URL` | —           | PostgreSQL connection URL |
+| `AMQP_URL`     | —           | RabbitMQ connection URL  |
 
 ### 3. Run the client
 
@@ -40,7 +39,33 @@ Default listen address: `:8080`. Override with `LISTEN_ADDR`.
 go run ./cmd/client
 ```
 
-Override with `SERVER_ADDR` and `USERNAME` env vars. Multiple clients can run simultaneously.
+Starts two things simultaneously:
+- **CLI worker** — connects to the server, auto-submits SHA256 results every ~1s
+- **Web UI** — serves the test interface at http://localhost:8081
+
+| Flag/Env var            | Default          | Description              |
+|-------------------------|------------------|--------------------------|
+| `-server` / `SERVER_ADDR` | `localhost:8080` | TCP server address       |
+| `-username` / `USERNAME`  | `worker`         | Worker username          |
+| `-web-addr` / `WEB_ADDR`  | `:8081`          | Web UI listen address    |
+
+#### Multiple workers (concurrency testing)
+
+```bash
+# Each in a separate terminal:
+go run ./cmd/client -username worker-1
+go run ./cmd/client -username worker-2 -web-addr :8082
+go run ./cmd/client -username worker-3 -web-addr :8083
+```
+
+### 4. Full stack via Docker Compose
+
+```bash
+docker compose up --build
+```
+
+- Server TCP → `localhost:8080`
+- Web UI     → `http://localhost:8081`
 
 ## Tests
 
@@ -58,16 +83,29 @@ go test ./... -tags=integration -timeout 120s
 ## Project structure
 
 ```
-internal/
-  auth/         per-session authentication
-  submission/   SHA256 validation, rate-limit, dedup
-  job/          30s ticker, session registry, broadcast
-  stats/        per-minute PostgreSQL upsert
-  queue/        RabbitMQ producer/consumer (bonus)
-  server/       TCP server wiring all packages together
 cmd/
-  server/       server entrypoint
-  client/       client entrypoint
+  server/       TCP server entrypoint (LISTEN_ADDR, DATABASE_URL, AMQP_URL)
+  client/       Client entrypoint — CLI worker + web UI (go:embed)
+    index.html  Browser test interface
+internal/
+  auth/         Per-session authentication
+  submission/   SHA256 validation, rate-limit, dedup
+  job/          30s broadcaster, session registry
+  stats/        Per-minute PostgreSQL upsert
+  queue/        RabbitMQ producer/consumer (bonus)
+  server/       TCP server, wires all packages together
 db/migrations/  SQL schema
-test/integration/ integration tests (build tag: integration)
+test/integration/ Integration tests (build tag: integration)
+```
+
+## Protocol (JSON over TCP)
+
+All messages are newline-delimited JSON.
+
+```
+Client → Server   {"id":1,"method":"authorize","params":{"username":"worker"}}
+Server → Client   {"id":1,"result":true}
+Server → Client   {"id":null,"method":"job","params":{"job_id":1,"server_nonce":"abc..."}}
+Client → Server   {"id":2,"method":"submit","params":{"job_id":1,"client_nonce":"xyz...","result":"sha256..."}}
+Server → Client   {"id":2,"result":true}
 ```

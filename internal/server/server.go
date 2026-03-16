@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -109,7 +110,7 @@ func (s *Server) Close() {
 	s.ln.Close()
 }
 
-// Serve accepts connections until Close is called.
+// Serve accepts TCP connections until Close is called.
 func (s *Server) Serve() {
 	for {
 		conn, err := s.ln.Accept()
@@ -135,14 +136,23 @@ func (s *Server) handleConnection(conn net.Conn) {
 		vs:   submission.NewValidationState(),
 	}
 
-	sessionKey := conn.RemoteAddr().String()
-	s.Manager.AddSession(sessionKey, sess)
-	defer s.Manager.RemoveSession(sessionKey)
+	key := conn.RemoteAddr().String()
+	s.Manager.AddSession(key, sess)
+	defer s.Manager.RemoveSession(key)
 
 	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
+	for {
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil && err != io.EOF {
+				log.Printf("scan: %v", err)
+			}
+			return
+		}
+		line := make([]byte, len(scanner.Bytes()))
+		copy(line, scanner.Bytes())
+
 		var msg Message
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
 		s.dispatch(sess, &msg)
@@ -178,6 +188,12 @@ func (s *Server) handleAuthorize(sess *Session, msg *Message) {
 		return
 	}
 	writeResponse(sess.conn, Response{ID: msg.ID, Result: true})
+
+	// Send the current job immediately so the client doesn't have to wait for
+	// the next 30-second broadcast.
+	if jobID, nonce := s.Manager.CurrentJob(); jobID > 0 {
+		sess.NotifyJob(jobID, nonce)
+	}
 }
 
 type submitParams struct {

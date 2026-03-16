@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hashworker Tester</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      padding: 12px 20px;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3148;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1rem; font-weight: 600; color: #a78bfa; }
+    #bridge-url {
+      flex: 1;
+      max-width: 320px;
+      padding: 5px 10px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 0.82rem;
+      outline: none;
+    }
+    #bridge-url:focus { border-color: #6366f1; }
+
+    main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Left panel ─────────────────────────────────────────── */
+    .panel {
+      width: 320px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      background: #1a1d27;
+      border-right: 1px solid #2d3148;
+      overflow: hidden;
+    }
+
+    .panel-top {
+      padding: 14px 16px;
+      border-bottom: 1px solid #2d3148;
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    #new-username {
+      flex: 1;
+      padding: 7px 10px;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 0.84rem;
+      outline: none;
+    }
+    #new-username:focus { border-color: #6366f1; }
+
+    #sessions-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .empty-hint {
+      text-align: center;
+      color: #475569;
+      font-size: 0.8rem;
+      font-style: italic;
+      padding: 24px 0;
+    }
+
+    /* ── Session card ───────────────────────────────────────── */
+    .sess-card {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .sess-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      border-bottom: 1px solid #1e2235;
+    }
+
+    .sess-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #475569;
+      transition: background 0.3s;
+    }
+
+    .sess-name {
+      font-size: 0.84rem;
+      font-weight: 600;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sess-badge {
+      font-size: 0.68rem;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #1e2235;
+      color: #64748b;
+      flex-shrink: 0;
+    }
+
+    .sess-remove {
+      background: none;
+      border: none;
+      color: #475569;
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 2px 4px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    .sess-remove:hover { color: #f87171; background: #1e2235; }
+
+    .sess-job {
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      font-family: 'Fira Code', monospace;
+      color: #64748b;
+      border-bottom: 1px solid #1e2235;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sess-job span { color: #a78bfa; }
+
+    .sess-actions {
+      padding: 8px 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      border-bottom: 1px solid #1e2235;
+    }
+
+    .sess-submit-row {
+      padding: 8px 10px;
+      display: flex;
+      gap: 6px;
+    }
+
+    .sess-nonce {
+      flex: 1;
+      padding: 5px 8px;
+      background: #1a1d27;
+      border: 1px solid #2d3148;
+      border-radius: 5px;
+      color: #e2e8f0;
+      font-size: 0.78rem;
+      font-family: 'Fira Code', monospace;
+      outline: none;
+      min-width: 0;
+    }
+    .sess-nonce:focus { border-color: #6366f1; }
+
+    /* ── Buttons ────────────────────────────────────────────── */
+    button {
+      padding: 5px 11px;
+      border: none;
+      border-radius: 5px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+    button:active { transform: scale(0.96); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+    .btn-primary   { background: #6366f1; color: #fff; }
+    .btn-green     { background: #16a34a; color: #fff; }
+    .btn-red       { background: #dc2626; color: #fff; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-amber     { background: #d97706; color: #fff; }
+    .btn-sm { padding: 4px 9px; font-size: 0.75rem; }
+
+    /* ── Right panel: log ───────────────────────────────────── */
+    #log-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #log-header {
+      padding: 9px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #2d3148;
+      background: #161822;
+      flex-shrink: 0;
+    }
+    #log-header span { font-size: 0.75rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 14px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.77rem;
+      line-height: 1.65;
+    }
+
+    .log-entry {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      padding: 1px 0;
+    }
+    .log-entry + .log-entry { border-top: 1px solid #12151e; }
+
+    .log-time  { color: #334155; flex-shrink: 0; }
+    .log-tag   { flex-shrink: 0; font-weight: 700; font-size: 0.72rem; min-width: 52px; }
+    .log-dir   { flex-shrink: 0; width: 14px; }
+    .log-dir.out { color: #60a5fa; }
+    .log-dir.in  { color: #34d399; }
+    .log-dir.err { color: #f87171; }
+    .log-dir.sys { color: #fbbf24; }
+    .log-body  { color: #94a3b8; white-space: pre-wrap; word-break: break-all; flex: 1; }
+    .log-body.err { color: #f87171; }
+    .log-body.ok  { color: #34d399; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Hashworker Tester</h1>
+  <label style="font-size:0.78rem;color:#64748b;flex-shrink:0">Bridge</label>
+  <input id="bridge-url" type="text" />
+</header>
+
+<main>
+  <!-- ── Sessions panel ── -->
+  <aside class="panel">
+    <div class="panel-top">
+      <input id="new-username" type="text" placeholder="username (e.g. worker-1)" />
+      <button class="btn-primary" onclick="createSession()">+ Add</button>
+    </div>
+    <div id="sessions-list">
+      <div class="empty-hint">No sessions yet.<br>Click "+ Add" to create one.</div>
+    </div>
+  </aside>
+
+  <!-- ── Log ── -->
+  <div id="log-wrap">
+    <div id="log-header">
+      <span>Message log</span>
+      <button class="btn-secondary btn-sm" onclick="clearLog()">Clear</button>
+    </div>
+    <div id="log"></div>
+  </div>
+</main>
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────────
+const COLORS = ['#60a5fa','#34d399','#f59e0b','#f87171','#a78bfa','#fb923c','#e879f9','#2dd4bf']
+
+// Set bridge URL dynamically — fallback to localhost:8081 when opened as file://
+;(function () {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host  = window.location.host || 'localhost:8081'
+  document.getElementById('bridge-url').value = `${proto}//${host}/ws`
+})()
+
+// ── State ──────────────────────────────────────────────────────────────────
+const sessions = new Map()
+let counter = 0
+
+// ── Crypto ─────────────────────────────────────────────────────────────────
+async function sha256hex(msg) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg))
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('')
+}
+
+function randomNonce() {
+  const arr = new Uint8Array(8)
+  crypto.getRandomValues(arr)
+  return Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join('')
+}
+
+// ── Logging ────────────────────────────────────────────────────────────────
+function prettyJSON(text) {
+  try { return JSON.stringify(JSON.parse(text), null, 2) } catch { return text }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+function addLog(dir, text, cls, sess) {
+  const el    = document.getElementById('log')
+  const now   = new Date().toTimeString().slice(0, 8)
+  const entry = document.createElement('div')
+  entry.className = 'log-entry'
+
+  const icon   = dir === 'out' ? '▶' : dir === 'in' ? '◀' : dir === 'err' ? '✕' : '●'
+  const isJSON = text.trimStart().startsWith('{')
+  const body   = isJSON ? prettyJSON(text) : text
+
+  const tag = sess
+    ? `<span class="log-tag" style="color:${sess.color}">[${sess.username}]</span>`
+    : `<span class="log-tag" style="color:#475569">[system]</span>`
+
+  entry.innerHTML =
+    `<span class="log-time">${now}</span>` +
+    tag +
+    `<span class="log-dir ${dir}">${icon}</span>` +
+    `<span class="log-body ${cls || ''}">${escHtml(body)}</span>`
+
+  el.appendChild(entry)
+  el.scrollTop = el.scrollHeight
+}
+
+function clearLog() { document.getElementById('log').innerHTML = '' }
+
+// ── Session creation ───────────────────────────────────────────────────────
+function createSession() {
+  const input    = document.getElementById('new-username')
+  const id       = ++counter
+  const username = input.value.trim() || `worker-${id}`
+  const color    = COLORS[(id - 1) % COLORS.length]
+
+  const sess = { id, username, color, ws: null, msgID: 1, currentJob: null, authorized: false, autoTimer: null }
+  sessions.set(id, sess)
+
+  input.value = ''
+
+  // Remove empty hint
+  const hint = document.querySelector('.empty-hint')
+  if (hint) hint.remove()
+
+  renderCard(sess)
+  addLog('sys', `Session created`, '', sess)
+}
+
+function removeSession(id) {
+  const sess = sessions.get(id)
+  if (!sess) return
+  if (sess.ws) sess.ws.close()
+  if (sess.autoTimer) clearInterval(sess.autoTimer)
+  sessions.delete(id)
+  document.getElementById(`card-${id}`)?.remove()
+
+  if (sessions.size === 0) {
+    document.getElementById('sessions-list').innerHTML =
+      '<div class="empty-hint">No sessions yet.<br>Click "+ Add" to create one.</div>'
+  }
+  addLog('sys', `Session removed`, '', sess)
+}
+
+// ── Card rendering ─────────────────────────────────────────────────────────
+function renderCard(sess) {
+  const container = document.getElementById('sessions-list')
+  const card = document.createElement('div')
+  card.className = 'sess-card'
+  card.id = `card-${sess.id}`
+  card.innerHTML = `
+    <div class="sess-head">
+      <div class="sess-dot" id="dot-${sess.id}" style="background:#475569"></div>
+      <span class="sess-name" style="color:${sess.color}">${escHtml(sess.username)}</span>
+      <span class="sess-badge" id="badge-${sess.id}">disconnected</span>
+      <button class="sess-remove" onclick="removeSession(${sess.id})" title="Remove">✕</button>
+    </div>
+    <div class="sess-job" id="job-${sess.id}">
+      <span style="color:#475569;font-style:italic">No job received yet</span>
+    </div>
+    <div class="sess-actions">
+      <button class="btn-green btn-sm"     id="btn-connect-${sess.id}"    onclick="connectSession(${sess.id})">Connect</button>
+      <button class="btn-secondary btn-sm" id="btn-auth-${sess.id}"       onclick="authorizeSession(${sess.id})" disabled>Authorize</button>
+      <button class="btn-red btn-sm"       id="btn-disconnect-${sess.id}" onclick="disconnectSession(${sess.id})" disabled>Disconnect</button>
+    </div>
+    <div class="sess-submit-row">
+      <input class="sess-nonce" id="nonce-${sess.id}" type="text" placeholder="client nonce (auto)" />
+      <button class="btn-primary btn-sm"   id="btn-submit-${sess.id}"    onclick="submitOnce(${sess.id})" disabled>Submit</button>
+      <button class="btn-amber btn-sm"     id="btn-auto-${sess.id}"      onclick="toggleAuto(${sess.id})" disabled>▶ Auto</button>
+    </div>
+  `
+  container.appendChild(card)
+}
+
+function updateCard(sess) {
+  const dot    = document.getElementById(`dot-${sess.id}`)
+  const badge  = document.getElementById(`badge-${sess.id}`)
+  const jobEl  = document.getElementById(`job-${sess.id}`)
+  const btnCon = document.getElementById(`btn-connect-${sess.id}`)
+  const btnAuth= document.getElementById(`btn-auth-${sess.id}`)
+  const btnDis = document.getElementById(`btn-disconnect-${sess.id}`)
+  const btnSub = document.getElementById(`btn-submit-${sess.id}`)
+  const btnAuto= document.getElementById(`btn-auto-${sess.id}`)
+  if (!dot) return
+
+  const connected = sess.ws && sess.ws.readyState === WebSocket.OPEN
+
+  // dot color
+  dot.style.background = connected ? sess.color : '#475569'
+
+  // badge
+  let badgeText  = 'disconnected'
+  let badgeColor = '#475569'
+  if (connected && !sess.authorized) { badgeText = 'connected';   badgeColor = '#60a5fa' }
+  if (sess.authorized)               { badgeText = 'authorized';  badgeColor = '#22c55e' }
+  badge.textContent  = badgeText
+  badge.style.color  = badgeColor
+
+  // job info
+  if (sess.currentJob) {
+    const nonce = sess.currentJob.server_nonce
+    jobEl.innerHTML = `job <span>#${sess.currentJob.job_id}</span> · <span>${nonce.slice(0,12)}…</span>`
+  } else {
+    jobEl.innerHTML = '<span style="color:#475569;font-style:italic">No job received yet</span>'
+  }
+
+  // buttons
+  btnCon.disabled  = connected
+  btnAuth.disabled = !connected || sess.authorized
+  btnDis.disabled  = !connected
+  btnSub.disabled  = !sess.authorized
+  btnAuto.disabled = !sess.authorized
+
+  // auto label
+  btnAuto.textContent = sess.autoTimer ? '■ Stop' : '▶ Auto'
+  btnAuto.className   = sess.autoTimer ? 'btn-red btn-sm' : 'btn-amber btn-sm'
+}
+
+// ── Connection ─────────────────────────────────────────────────────────────
+function connectSession(id) {
+  const sess = sessions.get(id)
+  if (!sess) return
+  const url = document.getElementById('bridge-url').value.trim()
+
+  sess.ws = new WebSocket(url)
+
+  sess.ws.onopen = () => {
+    updateCard(sess)
+    addLog('sys', 'WebSocket connected', '', sess)
+  }
+
+  sess.ws.onmessage = ({ data }) => {
+    addLog('in', data, '', sess)
+    try {
+      const msg = JSON.parse(data)
+      if (msg.method === 'job' && msg.params) {
+        sess.currentJob = msg.params
+        updateCard(sess)
+        return
+      }
+      if (msg.result === true)  addLog('sys', '✓ Accepted', 'ok', sess)
+      if (msg.result === false) addLog('err', '✗ ' + (msg.error || 'error'), 'err', sess)
+      if (msg.result === true && !sess.authorized) {
+        sess.authorized = true
+        updateCard(sess)
+      }
+    } catch {}
+  }
+
+  sess.ws.onerror = () => addLog('err', 'WebSocket error', 'err', sess)
+
+  sess.ws.onclose = () => {
+    sess.authorized = false
+    sess.currentJob = null
+    clearInterval(sess.autoTimer)
+    sess.autoTimer = null
+    updateCard(sess)
+    addLog('sys', 'Disconnected', '', sess)
+  }
+
+  updateCard(sess)
+  addLog('sys', `Connecting to ${url}…`, '', sess)
+}
+
+function disconnectSession(id) {
+  const sess = sessions.get(id)
+  if (sess?.ws) sess.ws.close()
+}
+
+// ── Auth ───────────────────────────────────────────────────────────────────
+function authorizeSession(id) {
+  const sess = sessions.get(id)
+  if (!sess?.ws || sess.ws.readyState !== WebSocket.OPEN) return
+  const msg = { id: sess.msgID++, method: 'authorize', params: { username: sess.username } }
+  const txt = JSON.stringify(msg)
+  sess.ws.send(txt)
+  addLog('out', txt, '', sess)
+}
+
+// ── Submit ─────────────────────────────────────────────────────────────────
+async function submitOnce(id) {
+  const sess = sessions.get(id)
+  if (!sess || !sess.currentJob) {
+    if (sess) addLog('err', 'No job to submit', 'err', sess)
+    return
+  }
+  const nonceInput  = document.getElementById(`nonce-${id}`)
+  const clientNonce = nonceInput.value.trim() || randomNonce()
+  nonceInput.value  = ''
+  const result = await sha256hex(sess.currentJob.server_nonce + clientNonce)
+  const msg = {
+    id: sess.msgID++,
+    method: 'submit',
+    params: { job_id: sess.currentJob.job_id, client_nonce: clientNonce, result }
+  }
+  const txt = JSON.stringify(msg)
+  sess.ws.send(txt)
+  addLog('out', txt, '', sess)
+}
+
+// ── Auto-submit ────────────────────────────────────────────────────────────
+function toggleAuto(id) {
+  const sess = sessions.get(id)
+  if (!sess) return
+  if (sess.autoTimer) {
+    clearInterval(sess.autoTimer)
+    sess.autoTimer = null
+    addLog('sys', 'Auto-submit stopped', '', sess)
+  } else {
+    sess.autoTimer = setInterval(() => submitOnce(id), 2000)
+    addLog('sys', 'Auto-submit started (every 2s)', '', sess)
+    submitOnce(id)
+  }
+  updateCard(sess)
+}
+</script>
+</body>
+</html>

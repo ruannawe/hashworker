@@ -15,8 +15,8 @@ import (
 )
 
 func main() {
-	addr := envOrDefault("LISTEN_ADDR", ":8080")
-	dbURL := os.Getenv("DATABASE_URL")
+	addr    := envOrDefault("LISTEN_ADDR", ":8080")
+	dbURL   := os.Getenv("DATABASE_URL")
 	amqpURL := os.Getenv("AMQP_URL")
 
 	var db *sql.DB

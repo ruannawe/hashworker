@@ -3,16 +3,26 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/luxor/hashworker/internal/submission"
 )
+
+//go:embed index.html
+var indexHTML []byte
+
+// ── shared types ─────────────────────────────────────────────────────────────
 
 type Message struct {
 	ID     *int            `json:"id"`
@@ -43,30 +53,24 @@ func writeMsg(conn net.Conn, v any) {
 	conn.Write(data) //nolint:errcheck
 }
 
-func main() {
-	addr := envOrDefault("SERVER_ADDR", "localhost:8080")
-	username := envOrDefault("USERNAME", "worker")
-	minInterval := time.Minute
-	maxInterval := time.Second
+// ── CLI mode ──────────────────────────────────────────────────────────────────
 
-	conn, err := net.Dial("tcp", addr)
+func runCLI(serverAddr, username string) {
+	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
 		log.Fatalf("connect: %v", err)
 	}
 	defer conn.Close()
-	log.Printf("connected to %s as %s", addr, username)
+	log.Printf("connected to %s as %s", serverAddr, username)
 
-	// Authenticate.
-	id1 := 1
 	writeMsg(conn, map[string]any{
-		"id":     id1,
+		"id":     1,
 		"method": "authorize",
 		"params": map[string]string{"username": username},
 	})
 
 	scanner := bufio.NewScanner(conn)
 
-	// Read auth response.
 	if scanner.Scan() {
 		var resp Response
 		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
@@ -79,17 +83,15 @@ func main() {
 	}
 
 	var (
-		currentJobID    int
-		currentNonce    string
-		lastSubmit      time.Time
-		msgID           = 2
-		submitTicker    = time.NewTicker(maxInterval)
+		currentJobID int
+		currentNonce string
+		lastSubmit   time.Time
+		msgID        = 2
+		submitTicker = time.NewTicker(time.Second)
 	)
 	defer submitTicker.Stop()
 
 	msgCh := make(chan []byte, 32)
-
-	// Reader goroutine: forward server messages to channel.
 	go func() {
 		for scanner.Scan() {
 			line := make([]byte, len(scanner.Bytes()))
@@ -118,7 +120,6 @@ func main() {
 					log.Printf("received job %d nonce=%s", currentJobID, currentNonce)
 				}
 			} else {
-				// Submit response.
 				var resp Response
 				if err := json.Unmarshal(line, &resp); err == nil {
 					if resp.Error != "" {
@@ -133,24 +134,13 @@ func main() {
 			if currentJobID == 0 || currentNonce == "" {
 				continue
 			}
-			// Respect minimum interval (1/minute) — always submit at tick rate
-			// but honour the 1/s maximum implicitly via the ticker.
-			now := time.Now()
-			if !lastSubmit.IsZero() && now.Sub(lastSubmit) < minInterval {
-				// Submit at most once per second, at least once per minute.
-				// The ticker fires every second; skip if we already submitted
-				// this second.
-				if now.Sub(lastSubmit) < maxInterval {
-					continue
-				}
+			if !lastSubmit.IsZero() && time.Since(lastSubmit) < time.Second {
+				continue
 			}
-
 			clientNonce := randomNonce()
 			result := submission.CalcResult(currentNonce, clientNonce)
-			id := msgID
-			msgID++
 			writeMsg(conn, map[string]any{
-				"id":     id,
+				"id":     msgID,
 				"method": "submit",
 				"params": map[string]any{
 					"job_id":       currentJobID,
@@ -158,11 +148,102 @@ func main() {
 					"result":       result,
 				},
 			})
-			lastSubmit = now
+			lastSubmit = now()
 			log.Printf("submitted job %d nonce=%s", currentJobID, clientNonce)
-
+			msgID++
 		}
 	}
+}
+
+func now() time.Time { return time.Now() }
+
+// ── Web mode ──────────────────────────────────────────────────────────────────
+
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// bridge connects a WebSocket client (browser) to a raw TCP server.
+// Each browser session gets its own TCP connection, maintaining full isolation.
+func bridge(ws *websocket.Conn, serverAddr string) {
+	tcp, err := net.Dial("tcp", serverAddr)
+	if err != nil {
+		log.Printf("bridge: tcp connect: %v", err)
+		ws.Close()
+		return
+	}
+	defer tcp.Close()
+	defer ws.Close()
+
+	var wsMu sync.Mutex
+	done := make(chan struct{})
+
+	// TCP → WebSocket
+	go func() {
+		defer close(done)
+		scanner := bufio.NewScanner(tcp)
+		for scanner.Scan() {
+			line := make([]byte, len(scanner.Bytes()))
+			copy(line, scanner.Bytes())
+			wsMu.Lock()
+			err := ws.WriteMessage(websocket.TextMessage, line)
+			wsMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// WebSocket → TCP
+	for {
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			break
+		}
+		msg = append(msg, '\n')
+		if _, err := tcp.Write(msg); err != nil {
+			break
+		}
+	}
+	<-done
+}
+
+func runWeb(serverAddr, webAddr string) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ws, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("ws upgrade: %v", err)
+			return
+		}
+		go bridge(ws, serverAddr)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexHTML) //nolint:errcheck
+	})
+
+	fmt.Printf("web UI → http://localhost%s\n", webAddr)
+	if err := http.ListenAndServe(webAddr, mux); err != nil {
+		log.Fatalf("http: %v", err)
+	}
+}
+
+// ── entrypoint ────────────────────────────────────────────────────────────────
+
+func main() {
+	webAddr    := flag.String("web-addr", envOrDefault("WEB_ADDR", ":8081"), "web UI listen address")
+	serverAddr := flag.String("server", envOrDefault("SERVER_ADDR", "localhost:8080"), "TCP server address")
+	username   := flag.String("username", envOrDefault("USERNAME", "worker"), "worker username (CLI mode)")
+	flag.Parse()
+
+	// Always start the web UI in the background.
+	go runWeb(*serverAddr, *webAddr)
+
+	// Run the CLI worker in the foreground.
+	runCLI(*serverAddr, *username)
 }
 
 func envOrDefault(key, def string) string {
@@ -170,9 +251,4 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func init() {
-	_ = fmt.Sprintf // avoid unused import
-	_ = os.Stderr
 }

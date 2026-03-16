@@ -3,6 +3,7 @@ module github.com/luxor/hashworker
 go 1.25.0
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.11.2
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/rabbitmq/amqp091-go v1.10.0
