@@ -33,32 +33,39 @@ go run ./cmd/server
 | `DATABASE_URL` | —           | PostgreSQL connection URL |
 | `AMQP_URL`     | —           | RabbitMQ connection URL  |
 
-### 3. Run the client
+### 3. Run the web UI
 
 ```bash
 go run ./cmd/client
 ```
 
-Starts two things simultaneously:
-- **CLI worker** — connects to the server, auto-submits SHA256 results every ~1s
-- **Web UI** — serves the test interface at http://localhost:8081
+Serves the browser interface at http://localhost:8081. All connections to the server are initiated from the browser — no background worker runs automatically.
 
-| Flag/Env var            | Default          | Description              |
-|-------------------------|------------------|--------------------------|
-| `-server` / `SERVER_ADDR` | `localhost:8080` | TCP server address       |
-| `-username` / `USERNAME`  | `worker`         | Worker username          |
-| `-web-addr` / `WEB_ADDR`  | `:8081`          | Web UI listen address    |
+| Flag/Env var              | Default          | Description           |
+|---------------------------|------------------|-----------------------|
+| `-server` / `SERVER_ADDR` | `localhost:8080` | TCP server address    |
+| `-web-addr` / `WEB_ADDR`  | `:8081`          | Web UI listen address |
 
-#### Multiple workers (concurrency testing)
+### 4. Run a CLI worker (optional)
 
 ```bash
-# Each in a separate terminal:
-go run ./cmd/client -username worker-1
-go run ./cmd/client -username worker-2 -web-addr :8082
-go run ./cmd/client -username worker-3 -web-addr :8083
+go run ./cmd/worker <username>
 ```
 
-### 4. Full stack via Docker Compose
+Connects to the server as `<username>` and auto-submits SHA256 results every ~1s. Runs independently of the web UI.
+
+```bash
+# Example — multiple workers in separate terminals:
+go run ./cmd/worker worker-1
+go run ./cmd/worker worker-2
+go run ./cmd/worker worker-3
+```
+
+| Flag/Env var              | Default          | Description        |
+|---------------------------|------------------|--------------------|
+| `-server` / `SERVER_ADDR` | `localhost:8080` | TCP server address |
+
+### 5. Full stack via Docker Compose
 
 ```bash
 docker compose up --build
@@ -85,8 +92,9 @@ go test ./... -tags=integration -timeout 120s
 ```
 cmd/
   server/       TCP server entrypoint (LISTEN_ADDR, DATABASE_URL, AMQP_URL)
-  client/       Client entrypoint — CLI worker + web UI (go:embed)
-    index.html  Browser test interface
+  client/       Web bridge — serves the browser UI (go:embed index.html)
+    index.html  Browser test interface (integration test button included)
+  worker/       CLI mining worker — connects and auto-submits (run directly)
 internal/
   auth/         Per-session authentication
   submission/   SHA256 validation, rate-limit, dedup

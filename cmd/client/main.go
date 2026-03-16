@@ -2,162 +2,22 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	_ "embed"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
-	"time"
+	"syscall"
 
 	"github.com/gorilla/websocket"
-	"github.com/luxor/hashworker/internal/submission"
 )
 
 //go:embed index.html
 var indexHTML []byte
-
-// ── shared types ─────────────────────────────────────────────────────────────
-
-type Message struct {
-	ID     *int            `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
-}
-
-type Response struct {
-	ID     *int   `json:"id"`
-	Result any    `json:"result"`
-	Error  string `json:"error,omitempty"`
-}
-
-type jobParams struct {
-	JobID       int    `json:"job_id"`
-	ServerNonce string `json:"server_nonce"`
-}
-
-func randomNonce() string {
-	b := make([]byte, 8)
-	rand.Read(b) //nolint:errcheck
-	return hex.EncodeToString(b)
-}
-
-func writeMsg(conn net.Conn, v any) {
-	data, _ := json.Marshal(v)
-	data = append(data, '\n')
-	conn.Write(data) //nolint:errcheck
-}
-
-// ── CLI mode ──────────────────────────────────────────────────────────────────
-
-func runCLI(serverAddr, username string) {
-	conn, err := net.Dial("tcp", serverAddr)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
-	defer conn.Close()
-	log.Printf("connected to %s as %s", serverAddr, username)
-
-	writeMsg(conn, map[string]any{
-		"id":     1,
-		"method": "authorize",
-		"params": map[string]string{"username": username},
-	})
-
-	scanner := bufio.NewScanner(conn)
-
-	if scanner.Scan() {
-		var resp Response
-		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
-			log.Fatalf("auth response parse: %v", err)
-		}
-		if resp.Error != "" {
-			log.Fatalf("auth failed: %s", resp.Error)
-		}
-		log.Printf("authenticated as %s", username)
-	}
-
-	var (
-		currentJobID int
-		currentNonce string
-		lastSubmit   time.Time
-		msgID        = 2
-		submitTicker = time.NewTicker(time.Second)
-	)
-	defer submitTicker.Stop()
-
-	msgCh := make(chan []byte, 32)
-	go func() {
-		for scanner.Scan() {
-			line := make([]byte, len(scanner.Bytes()))
-			copy(line, scanner.Bytes())
-			msgCh <- line
-		}
-		close(msgCh)
-	}()
-
-	for {
-		select {
-		case line, ok := <-msgCh:
-			if !ok {
-				log.Println("connection closed")
-				return
-			}
-			var msg Message
-			if err := json.Unmarshal(line, &msg); err != nil {
-				continue
-			}
-			if msg.Method == "job" {
-				var p jobParams
-				if err := json.Unmarshal(msg.Params, &p); err == nil {
-					currentJobID = p.JobID
-					currentNonce = p.ServerNonce
-					log.Printf("received job %d nonce=%s", currentJobID, currentNonce)
-				}
-			} else {
-				var resp Response
-				if err := json.Unmarshal(line, &resp); err == nil {
-					if resp.Error != "" {
-						log.Printf("submit error: %s", resp.Error)
-					} else {
-						log.Printf("submit accepted")
-					}
-				}
-			}
-
-		case <-submitTicker.C:
-			if currentJobID == 0 || currentNonce == "" {
-				continue
-			}
-			if !lastSubmit.IsZero() && time.Since(lastSubmit) < time.Second {
-				continue
-			}
-			clientNonce := randomNonce()
-			result := submission.CalcResult(currentNonce, clientNonce)
-			writeMsg(conn, map[string]any{
-				"id":     msgID,
-				"method": "submit",
-				"params": map[string]any{
-					"job_id":       currentJobID,
-					"client_nonce": clientNonce,
-					"result":       result,
-				},
-			})
-			lastSubmit = now()
-			log.Printf("submitted job %d nonce=%s", currentJobID, clientNonce)
-			msgID++
-		}
-	}
-}
-
-func now() time.Time { return time.Now() }
-
-// ── Web mode ──────────────────────────────────────────────────────────────────
 
 var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -231,24 +91,21 @@ func runWeb(serverAddr, webAddr string) {
 	}
 }
 
-// ── entrypoint ────────────────────────────────────────────────────────────────
-
-func main() {
-	webAddr    := flag.String("web-addr", envOrDefault("WEB_ADDR", ":8081"), "web UI listen address")
-	serverAddr := flag.String("server", envOrDefault("SERVER_ADDR", "localhost:8080"), "TCP server address")
-	username   := flag.String("username", envOrDefault("USERNAME", "worker"), "worker username (CLI mode)")
-	flag.Parse()
-
-	// Always start the web UI in the background.
-	go runWeb(*serverAddr, *webAddr)
-
-	// Run the CLI worker in the foreground.
-	runCLI(*serverAddr, *username)
-}
-
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
+}
+
+func main() {
+	webAddr    := flag.String("web-addr", envOrDefault("WEB_ADDR", ":8081"), "web UI listen address")
+	serverAddr := flag.String("server", envOrDefault("SERVER_ADDR", "localhost:8080"), "TCP server address")
+	flag.Parse()
+
+	go runWeb(*serverAddr, *webAddr)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 }

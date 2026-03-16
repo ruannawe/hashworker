@@ -210,6 +210,7 @@
     .btn-red       { background: #dc2626; color: #fff; }
     .btn-secondary { background: #334155; color: #e2e8f0; }
     .btn-amber     { background: #d97706; color: #fff; }
+    .btn-purple    { background: #7c3aed; color: #fff; }
     .btn-sm { padding: 4px 9px; font-size: 0.75rem; }
 
     /* ── Right panel: log ───────────────────────────────────── */
@@ -266,6 +267,7 @@
   <h1>Hashworker Tester</h1>
   <label style="font-size:0.78rem;color:#64748b;flex-shrink:0">Bridge</label>
   <input id="bridge-url" type="text" />
+  <button id="btn-integration-test" class="btn-purple" onclick="runIntegrationTest()" style="flex-shrink:0">🧪 Integration Test</button>
 </header>
 
 <main>
@@ -304,6 +306,7 @@ const COLORS = ['#60a5fa','#34d399','#f59e0b','#f87171','#a78bfa','#fb923c','#e8
 // ── State ──────────────────────────────────────────────────────────────────
 const sessions = new Map()
 let counter = 0
+let suppressSessionLogs = false   // true while integration test is running
 
 // ── Crypto ─────────────────────────────────────────────────────────────────
 async function sha256hex(msg) {
@@ -475,7 +478,7 @@ function connectSession(id) {
   }
 
   sess.ws.onmessage = ({ data }) => {
-    addLog('in', data, '', sess)
+    if (!suppressSessionLogs) addLog('in', data, '', sess)
     try {
       const msg = JSON.parse(data)
       if (msg.method === 'job' && msg.params) {
@@ -483,8 +486,10 @@ function connectSession(id) {
         updateCard(sess)
         return
       }
-      if (msg.result === true)  addLog('sys', '✓ Accepted', 'ok', sess)
-      if (msg.result === false) addLog('err', '✗ ' + (msg.error || 'error'), 'err', sess)
+      if (!suppressSessionLogs) {
+        if (msg.result === true)  addLog('sys', '✓ Accepted', 'ok', sess)
+        if (msg.result === false) addLog('err', '✗ ' + (msg.error || 'error'), 'err', sess)
+      }
       if (msg.result === true && !sess.authorized) {
         sess.authorized = true
         updateCard(sess)
@@ -492,7 +497,7 @@ function connectSession(id) {
     } catch {}
   }
 
-  sess.ws.onerror = () => addLog('err', 'WebSocket error', 'err', sess)
+  sess.ws.onerror = () => { if (!suppressSessionLogs) addLog('err', 'WebSocket error', 'err', sess) }
 
   sess.ws.onclose = () => {
     sess.authorized = false
@@ -500,7 +505,7 @@ function connectSession(id) {
     clearInterval(sess.autoTimer)
     sess.autoTimer = null
     updateCard(sess)
-    addLog('sys', 'Disconnected', '', sess)
+    if (!suppressSessionLogs) addLog('sys', 'Disconnected', '', sess)
   }
 
   updateCard(sess)
@@ -557,6 +562,207 @@ function toggleAuto(id) {
     submitOnce(id)
   }
   updateCard(sess)
+}
+
+// ── TestConn — lightweight helper for integration test ─────────────────────
+// Buffers incoming messages so waitFor() works even when the message already
+// arrived before the promise was registered.
+class TestConn {
+  constructor(ws, username, color) {
+    this.ws       = ws
+    this.username = username
+    this._sess    = { username, color }   // fake session for addLog
+    this.msgID    = 1
+    this.currentJob = null
+    this._buf  = []   // messages that arrived before a waitFor was registered
+    this._wait = []   // { pred, resolve, reject, timer }
+
+    ws.onmessage = ({ data }) => {
+      addLog('in', data, '', this._sess)   // log every incoming message
+      let m
+      try { m = JSON.parse(data) } catch { return }
+      // Keep currentJob up-to-date
+      if (m.method === 'job' && m.params) this.currentJob = m.params
+      // Try to satisfy a pending waiter first
+      for (let i = 0; i < this._wait.length; i++) {
+        if (this._wait[i].pred(m)) {
+          const h = this._wait.splice(i, 1)[0]
+          clearTimeout(h.timer)
+          h.resolve(m)
+          return
+        }
+      }
+      // No waiter matched — buffer it
+      this._buf.push(m)
+    }
+
+    const rejectAll = (err) => {
+      this._wait.forEach(h => { clearTimeout(h.timer); h.reject(err) })
+      this._wait = []
+    }
+    ws.onerror = () => rejectAll(new Error(`ws error (${username})`))
+    ws.onclose = () => rejectAll(new Error(`ws closed (${username})`))
+  }
+
+  // Returns a promise that resolves with the first message matching pred.
+  // Checks the buffer before registering a live waiter.
+  waitFor(pred, ms = 8000) {
+    const i = this._buf.findIndex(pred)
+    if (i >= 0) return Promise.resolve(this._buf.splice(i, 1)[0])
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const j = this._wait.findIndex(h => h.resolve === resolve)
+        if (j >= 0) this._wait.splice(j, 1)
+        reject(new Error(`timeout ${ms}ms (${this.username})`))
+      }, ms)
+      this._wait.push({ pred, resolve, reject, timer })
+    })
+  }
+
+  send(obj) {
+    addLog('out', JSON.stringify(obj), '', this._sess)   // log every outgoing message
+    this.ws.send(JSON.stringify(obj))
+  }
+  nextID()   { return this.msgID++ }
+}
+
+// ── Integration test ────────────────────────────────────────────────────────
+// Steps:
+//   1. Open 100 parallel WebSocket connections.
+//   2. Authenticate every connection.
+//   3. Wait for the initial job (server sends it right after auth), then
+//      submit once on each connection.
+//   4. Wait ≤ 40 s for the server to rotate the nonce (~every 30 s) and
+//      send a new job to all authenticated sessions.
+//   5. Submit again on each connection with the new nonce.
+// Logs progress to the message-log panel; finishes with PASSED / FAILED.
+
+let integrationTestRunning = false
+
+async function runIntegrationTest() {
+  if (integrationTestRunning) return
+  integrationTestRunning = true
+  suppressSessionLogs = true   // silence regular-session noise during the test
+
+  const btn = document.getElementById('btn-integration-test')
+  btn.disabled  = true
+  btn.className = 'btn-amber'
+  btn.textContent = '⏳ Running…'
+
+  // Add a separator instead of wiping the whole log
+  addLog('sys', '─────── Integration Test Started ───────', '', null)
+
+  const url = document.getElementById('bridge-url').value.trim()
+  const N   = 100
+  const all = []   // all TestConn instances, for cleanup
+
+  function tlog(msg, cls) { addLog('sys', msg, cls || '', null) }
+
+  // Run fn(conn, index) for every connection concurrently.
+  // Throws if any promise rejects, reporting how many failed.
+  async function runAll(label, conns, fn) {
+    const results = await Promise.allSettled(conns.map((c, i) => fn(c, i)))
+    const failed  = results.filter(r => r.status === 'rejected')
+    if (failed.length) {
+      throw new Error(
+        `${label}: ${failed.length}/${N} failed — ${failed[0].reason.message}`
+      )
+    }
+  }
+
+  try {
+    // ── Step 1: Connect ──────────────────────────────────────────────────
+    tlog(`[1/5] Connecting ${N} WebSocket sessions in parallel…`)
+    const conns = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        new Promise((resolve, reject) => {
+          const ws = new WebSocket(url)
+          const t  = setTimeout(
+            () => reject(new Error(`connect timeout worker-${i + 1}`)), 8000
+          )
+          ws.onopen  = () => { clearTimeout(t); resolve(new TestConn(ws, `test-${i + 1}`, COLORS[i % COLORS.length])) }
+          ws.onerror = () => { clearTimeout(t); reject(new Error(`connect error worker-${i + 1}`)) }
+        })
+      )
+    )
+    all.push(...conns)
+    tlog(`[1/5] ✓ ${N} connections established`, 'ok')
+
+    // ── Step 2: Authenticate ─────────────────────────────────────────────
+    tlog(`[2/5] Authenticating ${N} sessions in parallel…`)
+    await runAll('auth', conns, async (c, i) => {
+      const id  = c.nextID()
+      c.send({ id, method: 'authorize', params: { username: c.username } })
+      const resp = await c.waitFor(m => m.id === id)
+      if (resp.result !== true)
+        throw new Error(`${c.username}: ${resp.error || 'auth rejected'}`)
+    })
+    tlog(`[2/5] ✓ All ${N} sessions authenticated`, 'ok')
+
+    // ── Step 3: Initial job + first submit ───────────────────────────────
+    tlog(`[3/5] Waiting for initial job (sent by server right after auth)…`)
+    await runAll('initial-job', conns, c =>
+      c.waitFor(m => m.method === 'job' && !!m.params)
+    )
+    tlog(`[3/5] ✓ Initial job received on all sessions — submitting…`)
+    await runAll('submit-1', conns, async c => {
+      const job = c.currentJob
+      if (!job) throw new Error(`${c.username}: no current job`)
+      const clientNonce = randomNonce()
+      const result      = await sha256hex(job.server_nonce + clientNonce)
+      const id          = c.nextID()
+      c.send({ id, method: 'submit',
+               params: { job_id: job.job_id, client_nonce: clientNonce, result } })
+      const resp = await c.waitFor(m => m.id === id)
+      if (resp.result !== true)
+        throw new Error(`${c.username} submit#1: ${resp.error || 'rejected'}`)
+    })
+    tlog(`[3/5] ✓ All ${N} submit #1 accepted`, 'ok')
+
+    // ── Step 4: Wait for nonce rotation (server rotates every 30 s) ──────
+    tlog(`[4/5] Waiting up to 40 s for server to rotate nonce…`)
+    // Snapshot each connection's current job_id before the wait so we can
+    // detect the *next* job (higher job_id) independently per connection.
+    const snapshotIDs = conns.map(c => c.currentJob?.job_id ?? 0)
+    await runAll('new-nonce', conns, (c, i) =>
+      c.waitFor(
+        m => m.method === 'job' && m.params?.job_id > snapshotIDs[i],
+        45000   // 45 s gives the server's 30 s cycle a comfortable margin
+      )
+    )
+    tlog(`[4/5] ✓ All ${N} sessions received new server_nonce`, 'ok')
+
+    // ── Step 5: Second submit ────────────────────────────────────────────
+    tlog(`[5/5] Submitting again with updated nonce…`)
+    await runAll('submit-2', conns, async c => {
+      const job = c.currentJob
+      if (!job) throw new Error(`${c.username}: no job after rotation`)
+      const clientNonce = randomNonce()
+      const result      = await sha256hex(job.server_nonce + clientNonce)
+      const id          = c.nextID()
+      c.send({ id, method: 'submit',
+               params: { job_id: job.job_id, client_nonce: clientNonce, result } })
+      const resp = await c.waitFor(m => m.id === id)
+      if (resp.result !== true)
+        throw new Error(`${c.username} submit#2: ${resp.error || 'rejected'}`)
+    })
+    tlog(`[5/5] ✓ All ${N} submit #2 accepted`, 'ok')
+
+    tlog(`✅ Integration test PASSED — all ${N} connections completed every step`, 'ok')
+    btn.className   = 'btn-green'
+    btn.textContent = '✅ Test Passed'
+
+  } catch (err) {
+    tlog(`❌ Integration test FAILED: ${err.message}`, 'err')
+    btn.className   = 'btn-red'
+    btn.textContent = '❌ Test Failed'
+
+  } finally {
+    all.forEach(c => { try { c.ws.close() } catch {} })
+    suppressSessionLogs    = false   // restore regular-session logging
+    btn.disabled           = false
+    integrationTestRunning = false
+  }
 }
 </script>
 </body>
